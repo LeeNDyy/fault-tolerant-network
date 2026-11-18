@@ -1,0 +1,37 @@
+#!/bin/bash
+set -eu
+ip link add link trunk name lab.10 type vlan id 10
+ip addr add "192.168.10.$NODE/24" dev lab.10
+ip link set lab.10 up
+case "$DHCP_MODE" in
+    direct)
+        ip link add link trunk name lab.30 type vlan id 30
+        ip addr add "192.168.30.$NODE/24" dev lab.30
+        ip link set lab.30 up
+        ;;
+    relay)
+        ip route replace 192.168.30.0/24 via 192.168.10.1 dev lab.10
+        ;;
+    *) exit 2 ;;
+esac
+mkdir -p /run/kea
+umask 077
+python3 /usr/local/bin/render.py
+kea-dhcp4 -t /etc/kea/kea-dhcp4.conf
+kea-dhcp4 -c /etc/kea/kea-dhcp4.conf &
+dhcp_pid=$!
+kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf &
+control_pid=$!
+(
+    trap 'kill "$child" 2>/dev/null || true; wait; exit 0' TERM INT
+    while true; do
+        stork-agent &
+        child=$!
+        wait "$child" || true
+        sleep 5
+    done
+) &
+agent_pid=$!
+trap 'kill "$dhcp_pid" "$control_pid" "$agent_pid" 2>/dev/null || true; wait' EXIT
+trap 'exit 0' TERM INT
+wait -n

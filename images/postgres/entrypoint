@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+for password in "$PG_SUPER_PASSWORD" "$PG_REPLICATION_PASSWORD"; do
+    case "$password" in *[!A-Za-z0-9]*|"") exit 2 ;; esac
+    [ "${#password}" -ge 20 ]
+done
+install -d -m 0700 -o postgres -g postgres /data/pg
+install -d -m 0700 -o postgres -g postgres /run/patroni
+umask 077
+cat >/run/patroni/config.yml <<CONFIG
+scope: lab-pg
+name: $HOSTNAME
+etcd3:
+  hosts: [etcd1:2379, etcd2:2379, etcd3:2379]
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: $HOSTNAME:8008
+bootstrap:
+  dcs:
+    ttl: 20
+    loop_wait: 5
+    retry_timeout: 5
+    synchronous_mode: true
+    synchronous_mode_strict: true
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        shared_buffers: 64MB
+        password_encryption: scram-sha-256
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  pg_hba:
+    - host replication replicator 172.29.100.0/24 scram-sha-256
+    - host all all 172.29.100.0/24 scram-sha-256
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: $HOSTNAME:5432
+  data_dir: /data/pg
+  bin_dir: /usr/lib/postgresql/15/bin
+  pgpass: /run/patroni/pgpass
+  authentication:
+    superuser:
+      username: postgres
+      password: "$PG_SUPER_PASSWORD"
+    replication:
+      username: replicator
+      password: "$PG_REPLICATION_PASSWORD"
+CONFIG
+chown postgres:postgres /run/patroni/config.yml
+exec gosu postgres patroni /run/patroni/config.yml
