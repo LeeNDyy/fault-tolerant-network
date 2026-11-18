@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+grep -qw lab_install=1 /proc/cmdline || exit 0
+wget -qO /tmp/lab-answers http://192.168.30.14/alpine/answers
+. /tmp/lab-answers
+case "$DISK" in /dev/sda|/dev/vda) ;; *) exit 1 ;; esac
+[ -b "$DISK" ] || exit 1
+apk add --no-interactive lsblk blkid
+[ "$(lsblk -nr -o NAME "$DISK" | wc -l)" -eq 1 ] || exit 1
+if blkid -p "$DISK"; then
+    exit 1
+else
+    [ "$?" -eq 2 ] || exit 1
+fi
+iface="$(ip -4 route show default | awk 'NR == 1 {print $5}')"
+[ -n "$iface" ] || exit 1
+printf '%s\n' "$HOSTNAME" >/etc/hostname
+printf 'auto lo\niface lo inet loopback\n\nauto %s\niface %s inet dhcp\n' "$iface" "$iface" >/etc/network/interfaces
+rc-update add networking boot
+passwd -l root
+rm -f /etc/runlevels/default/local /etc/local.d/install.start
+ERASE_DISKS="$DISK" setup-disk -m sys "$DISK"
+poweroff

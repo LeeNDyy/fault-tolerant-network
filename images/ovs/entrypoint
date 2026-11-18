@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+mkdir -p /run/openvswitch
+ovsdb-tool create /run/openvswitch/conf.db /usr/share/openvswitch/vswitch.ovsschema
+ovsdb-server /run/openvswitch/conf.db --remote=punix:/run/openvswitch/db.sock --pidfile --detach
+ovs-vsctl --no-wait init
+ovs-vswitchd --pidfile --detach
+ovs-vsctl add-br br0 -- set Bridge br0 datapath_type=netdev fail_mode=standalone
+for port in trunk port2 port3 port4 port5; do
+    ip -4 addr flush dev "$port"
+    ovs-vsctl add-port br0 "$port"
+done
+for port in trunk port2 port3; do
+    ovs-vsctl set Port "$port" vlan_mode=trunk trunks=10,20,30
+done
+ovs-vsctl set Port port4 vlan_mode=access tag=10
+ovs-vsctl set Port port5 vlan_mode=access tag=30
+ovs-vsctl add-port br0 vlan10-mgmt -- set Interface vlan10-mgmt type=internal -- set Port vlan10-mgmt vlan_mode=access tag=10
+ip link set vlan10-mgmt up
+exec dhclient -4 -d -v vlan10-mgmt

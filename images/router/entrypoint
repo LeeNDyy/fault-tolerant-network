@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+for vlan in 10 30; do
+    ip link add link trunk name "lab.$vlan" type vlan id "$vlan"
+    ip addr add "192.168.$vlan.$NODE/24" dev "lab.$vlan"
+    ip link set "lab.$vlan" up
+done
+iptables -t nat -A POSTROUTING -o uplink -s 192.168.0.0/16 -j MASQUERADE
+case "$DHCP_MODE" in relay|direct) ;; *) exit 2 ;; esac
+cat >/tmp/keepalived.conf <<CONFIG
+global_defs {
+    router_id router_$NODE
+    script_user root
+    enable_script_security
+}
+vrrp_sync_group LAB {
+    group {
+        VLAN10
+        VLAN30
+    }
+    notify "/bin/sh /usr/local/bin/relay-state $DHCP_MODE"
+}
+CONFIG
+for vlan in 10 30; do
+    cat >>/tmp/keepalived.conf <<CONFIG
+vrrp_instance VLAN$vlan {
+    state BACKUP
+    interface lab.$vlan
+    virtual_router_id $vlan
+    priority $PRIORITY
+    advert_int 1
+    version 3
+    virtual_ipaddress {
+        192.168.$vlan.1/24 dev lab.$vlan
+    }
+}
+CONFIG
+done
+exec keepalived --dont-fork --log-console -f /tmp/keepalived.conf

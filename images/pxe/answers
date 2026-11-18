@@ -1,0 +1,2 @@
+HOSTNAME=alpine-vlan30
+DISK=/dev/sda

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+[ "$1" = relay ] || exit 0
+case "$4" in
+    MASTER)
+        dhcrelay -4 -pf /run/dhcrelay.pid -id lab.30 -iu lab.10 192.168.10.11 192.168.10.12
+        ;;
+    *)
+        if [ -s /run/dhcrelay.pid ]; then
+            kill "$(cat /run/dhcrelay.pid)" 2>/dev/null || true
+            rm -f /run/dhcrelay.pid
+        fi
+        ;;
+esac

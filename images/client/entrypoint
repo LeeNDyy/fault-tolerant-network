@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+action="${1:-}"
+ip -4 addr flush dev link0
+iface=link0
+if [ "${TAGGED:-0}" = 1 ]; then
+    ip link add link link0 name link0.10 type vlan id 10
+    ip link set link0.10 up
+    iface=link0.10
+fi
+case "${PXE_STAGE:-}" in
+    bios) set -- -x 0x5d:0000 -O 67 ;;
+    uefi) set -- -x 0x5d:0009 -O 67 ;;
+    ipxe) set -- -x 0x4d:0469505845 -O 67 ;;
+    '') set -- ;;
+    *) exit 2 ;;
+esac
+if [ "$#" -gt 0 ]; then
+    set -- "$@" -B
+fi
+if [ "$action" = check ]; then
+    udhcpc -f -n -q -i "$iface" -s /usr/local/bin/lease "$@"
+    exec /usr/local/bin/pxe-check
+fi
+exec udhcpc -f -i "$iface" -s /usr/local/bin/lease "$@"

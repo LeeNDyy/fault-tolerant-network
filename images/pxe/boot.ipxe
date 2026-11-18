@@ -1,0 +1,5 @@
+#!ipxe
+set base http://192.168.30.14/alpine
+kernel ${base}/vmlinuz-virt initrd=initramfs-virt ip=dhcp modules=loop,squashfs,sd-mod,usb-storage modloop=${base}/modloop-virt apkovl=${base}/install.apkovl.tar.gz alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.22/main lab_install=1
+initrd --name initramfs-virt ${base}/initramfs-virt
+boot

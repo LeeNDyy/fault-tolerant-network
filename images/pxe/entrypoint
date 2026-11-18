@@ -1,0 +1,12 @@
+#!/bin/bash
+set -eu
+ip link add link trunk name lab.30 type vlan id 30
+ip addr add 192.168.30.14/24 dev lab.30
+ip link set lab.30 up
+/usr/sbin/in.tftpd --foreground --address 192.168.30.14:69 --secure /srv/tftp &
+tftp_pid=$!
+nginx -g 'daemon off;' &
+http_pid=$!
+trap 'kill "$tftp_pid" "$http_pid" 2>/dev/null || true; wait' EXIT
+trap 'exit 0' TERM INT
+wait -n

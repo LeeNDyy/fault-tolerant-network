@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+ip -4 addr show dev link0 | grep '192\.168\.30\.'
+case "$PXE_STAGE" in
+    bios) expected=undionly.kpxe ;;
+    uefi) expected=ipxe.efi ;;
+    ipxe) expected=http://192.168.30.14/alpine/boot.ipxe ;;
+    *) exit 2 ;;
+esac
+test "$(sed -n '1p' /run/pxe-lease)" = 192.168.30.14
+test "$(sed -n '2p' /run/pxe-lease)" = "$expected"
+printf 'DHCP %s: %s\n' "$PXE_STAGE" "$expected"
+work="$(mktemp -d)"
+trap 'rm -f "$work/undionly.kpxe" "$work/ipxe.efi"; rmdir "$work"' EXIT
+for file in undionly.kpxe ipxe.efi; do
+    timeout 10 tftp 192.168.30.14 -m binary -c get "$file" "$work/$file"
+    test -s "$work/$file"
+done
+for file in boot.ipxe answers install.apkovl.tar.gz vmlinuz-virt initramfs-virt modloop-virt; do
+    curl -fsS -I "http://192.168.30.14/alpine/$file"
+done

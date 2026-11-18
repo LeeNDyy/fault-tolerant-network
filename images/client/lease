@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    deconfig)
+        ip -4 addr flush dev "$interface"
+        rm -f /run/pxe-lease
+        ;;
+    bound|renew)
+        ip addr replace "$ip/24" dev "$interface"
+        if [ -n "${router:-}" ]; then
+            set -- $router
+            ip route replace default via "$1" dev "$interface"
+        fi
+        if [ -n "${dns:-}" ]; then
+            printf 'nameserver %s\n' $dns >/etc/resolv.conf
+        fi
+        if [ -n "${PXE_STAGE:-}" ]; then
+            printf '%s\n' "${siaddr:-}" "${boot_file:-${bootfile:-}}" >/run/pxe-lease
+        fi
+        ;;
+esac
