@@ -1,0 +1,297 @@
+name: fault-tolerant-network
+
+x-etcd: &etcd
+  image: quay.io/coreos/etcd:v3.5.21
+  entrypoint: [/usr/local/bin/etcd]
+  command: []
+  restart: unless-stopped
+  networks: [backend]
+
+x-etcd-env: &etcd-env
+  ETCD_DATA_DIR: /etcd-data
+  ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+  ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+  ETCD_INITIAL_CLUSTER: etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+  ETCD_INITIAL_CLUSTER_TOKEN: fault-tolerant-network
+
+x-pg: &pg
+  build: images/postgres
+  image: ftn-postgres:lab
+  restart: unless-stopped
+  environment:
+    PG_SUPER_PASSWORD: ${PG_SUPER_PASSWORD:?set PG_SUPER_PASSWORD}
+    PG_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:?set PG_REPLICATION_PASSWORD}
+  depends_on: [etcd1, etcd2, etcd3]
+  networks: [backend]
+
+x-proxy: &proxy
+  image: haproxy:3.0-alpine
+  restart: unless-stopped
+  depends_on: [pg1, pg2, pg3]
+  volumes:
+    - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+  networks: [backend]
+
+x-kea-env: &kea-env
+  DHCP_MODE: ${DHCP_MODE:-relay}
+  KEA_DB_PASSWORD: ${KEA_DB_PASSWORD:?set KEA_DB_PASSWORD}
+  STORK_AGENT_SERVER_URL: http://stork:8080
+  STORK_AGENT_PORT: "8021"
+
+x-kea: &kea
+  build: images/kea
+  image: ftn-kea:lab
+  init: true
+  restart: unless-stopped
+  cap_add: [NET_ADMIN]
+  networks:
+    backend:
+      interface_name: backend0
+    trunk:
+      interface_name: trunk
+
+x-router: &router
+  build: images/router
+  image: ftn-router:lab
+  init: true
+  restart: unless-stopped
+  cap_add: [NET_ADMIN]
+  sysctls:
+    net.ipv4.ip_forward: "1"
+    net.ipv4.conf.all.rp_filter: "0"
+    net.ipv4.conf.default.rp_filter: "0"
+  networks:
+    wan:
+      interface_name: uplink
+      gw_priority: 1
+    trunk:
+      interface_name: trunk
+
+x-client: &client
+  build: images/client
+  image: ftn-alpine-client:lab
+  restart: unless-stopped
+  cap_add: [NET_ADMIN]
+  depends_on: [ovs]
+
+services:
+  etcd1:
+    <<: *etcd
+    hostname: etcd1
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd1
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd1:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd1:2380
+    volumes: [etcd1:/etcd-data]
+  etcd2:
+    <<: *etcd
+    hostname: etcd2
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd2
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd2:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd2:2380
+    volumes: [etcd2:/etcd-data]
+  etcd3:
+    <<: *etcd
+    hostname: etcd3
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd3
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd3:2379
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd3:2380
+    volumes: [etcd3:/etcd-data]
+
+  pg1:
+    <<: *pg
+    hostname: pg1
+    volumes: [pg1:/data]
+  pg2:
+    <<: *pg
+    hostname: pg2
+    volumes: [pg2:/data]
+  pg3:
+    <<: *pg
+    hostname: pg3
+    volumes: [pg3:/data]
+
+  db-primary:
+    <<: *proxy
+  db-standby:
+    <<: *proxy
+  db-stork:
+    <<: *proxy
+
+  db-init:
+    build: images/kea
+    image: ftn-kea:lab
+    entrypoint: [sh, /usr/local/bin/bootstrap]
+    restart: on-failure
+    depends_on: [db-primary]
+    networks: [backend]
+    environment:
+      DB_HOST: db-primary
+      PG_SUPER_PASSWORD: ${PG_SUPER_PASSWORD:?set PG_SUPER_PASSWORD}
+      KEA_DB_PASSWORD: ${KEA_DB_PASSWORD:?set KEA_DB_PASSWORD}
+      STORK_DB_PASSWORD: ${STORK_DB_PASSWORD:?set STORK_DB_PASSWORD}
+
+  kea-primary:
+    <<: *kea
+    hostname: kea-primary
+    environment:
+      <<: *kea-env
+      NODE: "11"
+      DB_HOST: db-primary
+      STORK_AGENT_HOST: kea-primary
+    volumes: [agent-primary:/var/lib/stork-agent]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+
+  kea-standby:
+    <<: *kea
+    hostname: kea-standby
+    environment:
+      <<: *kea-env
+      NODE: "12"
+      DB_HOST: db-standby
+      STORK_AGENT_HOST: kea-standby
+    volumes: [agent-standby:/var/lib/stork-agent]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      db-standby:
+        condition: service_started
+
+  stork:
+    build: images/stork
+    image: ftn-stork:lab
+    restart: unless-stopped
+    networks: [backend, ui]
+    ports: ["127.0.0.1:8080:8080"]
+    volumes: [stork:/var/lib/stork-server]
+    environment:
+      STORK_DATABASE_HOST: db-stork
+      STORK_DATABASE_NAME: storkdb
+      STORK_DATABASE_USER_NAME: stork
+      STORK_DATABASE_PASSWORD: ${STORK_DB_PASSWORD:?set STORK_DB_PASSWORD}
+      STORK_REST_HOST: 0.0.0.0
+      STORK_REST_PORT: "8080"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      db-stork:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    networks: [backend, ui]
+    ports: ["127.0.0.1:9090:9090"]
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+
+  router-1:
+    <<: *router
+    environment:
+      NODE: "2"
+      PRIORITY: "150"
+      DHCP_MODE: ${DHCP_MODE:-relay}
+
+  router-2:
+    <<: *router
+    environment:
+      NODE: "3"
+      PRIORITY: "100"
+      DHCP_MODE: ${DHCP_MODE:-relay}
+
+  ovs:
+    build: images/ovs
+    restart: unless-stopped
+    init: true
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: [/dev/net/tun:/dev/net/tun]
+    tmpfs: [/run/openvswitch]
+    networks:
+      trunk:
+        interface_name: trunk
+      p2:
+        interface_name: port2
+      p3:
+        interface_name: port3
+      p4:
+        interface_name: port4
+      p5:
+        interface_name: port5
+
+  alpine-1:
+    <<: *client
+    environment:
+      TAGGED: "1"
+    networks:
+      p2:
+        interface_name: link0
+
+  alpine-2:
+    <<: *client
+    environment:
+      TAGGED: "1"
+    networks:
+      p3:
+        interface_name: link0
+
+  alpine-3:
+    <<: *client
+    networks:
+      p4:
+        interface_name: link0
+
+  pxe-client:
+    <<: *client
+    environment:
+      PXE_STAGE: bios
+    networks:
+      p5:
+        interface_name: link0
+
+  pxe:
+    build: images/pxe
+    restart: unless-stopped
+    init: true
+    cap_add: [NET_ADMIN]
+    networks:
+      trunk:
+        interface_name: trunk
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.29.100.0/24
+  ui: {}
+  wan: {}
+  trunk:
+    internal: true
+  p2:
+    internal: true
+  p3:
+    internal: true
+  p4:
+    internal: true
+  p5:
+    internal: true
+
+volumes:
+  etcd1: {}
+  etcd2: {}
+  etcd3: {}
+  pg1: {}
+  pg2: {}
+  pg3: {}
+  agent-primary: {}
+  agent-standby: {}
+  stork: {}
+  prometheus: {}
